@@ -742,6 +742,36 @@ size_t ggml_cuda_flash_attn_ext_get_alloc_size(int device, const ggml_tensor * d
 
 void ggml_cuda_flash_attn_ext(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     ggml_cuda_set_device(ctx.device);
+
+#if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA) && CUDART_VERSION >= 11000
+    // DRIVE Thor (sm_100/sm_101) 48MB L2 Cache Persisting Window
+    // Pins active KV cache head in L2 to eliminate cache thrashing during long-context decode
+    const int cc = ggml_cuda_info().devices[ctx.device].cc;
+    if (cc >= 1000 && cc < GGML_CUDA_CC_BLACKWELL) {
+        static bool l2_persisting_initialized = false;
+        if (!l2_persisting_initialized) {
+            cudaDeviceProp prop;
+            if (cudaGetDeviceProperties(&prop, ctx.device) == cudaSuccess && prop.persistingL2CacheMaxSize > 0) {
+                // Reserve up to 32MB of Thor's 48MB L2 Cache for persisting memory accesses
+                size_t persisting_size = std::min<size_t>(prop.persistingL2CacheMaxSize, 32 * 1024 * 1024);
+                cudaDeviceSetLimit(cudaLimitPersistingL2CacheSize, persisting_size);
+            }
+            l2_persisting_initialized = true;
+        }
+
+        const ggml_tensor * K = dst->src[1];
+        if (K != nullptr && K->data != nullptr) {
+            cudaStreamAttrValue attr = {};
+            attr.accessPolicyWindow.base_ptr = (void *) K->data;
+            attr.accessPolicyWindow.num_bytes = std::min<size_t>((size_t)ggml_nbytes(K), 32 * 1024 * 1024);
+            attr.accessPolicyWindow.hitRatio = 1.0f;
+            attr.accessPolicyWindow.hitProp = cudaAccessPropertyPersisting;
+            attr.accessPolicyWindow.missProp = cudaAccessPropertyStreaming;
+            cudaStreamSetAttribute(ctx.stream(), cudaStreamAttributeAccessPolicyWindow, &attr);
+        }
+    }
+#endif
+
     switch (ggml_cuda_get_best_fattn_kernel(ggml_cuda_get_device(), dst)) {
         case BEST_FATTN_KERNEL_NONE:
             GGML_ABORT("fatal error");
