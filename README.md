@@ -109,25 +109,34 @@ cmake -B build \
 cmake --build build --config Release -j12 --target llama-server
 ```
 
-### 2. 生产推荐启动命令 (已实测防 OOM 最稳配置)
+### 2. 今晚板端实测定案的生产启动命令 (4 槽位 × 128K Unified KV 共享池)
+
+这是今晚在板端实测达成 **41.00 tok/s 并发总吞吐 / 18.82 tok/s 单流速度** 的标准生产启动命令：
 
 ```bash
+# 1. 注入 Blackwell / sm_101 硬件级加速与防争抢环境变量
+export GGML_CUDA_PDL=1
+export CUDA_DEVICE_MAX_CONNECTIONS=1
+
+# 2. 生产服务端拉起命令 (Unified KV 动态共享池，支持单槽满打 128K 长文本)
 /zeekr_data/llama.cpp/build/bin/llama-server \
   -m /zeekr_map/models/gguf/Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-NVFP4-v4.gguf \
   -ngl 99 \
-  -c 131072 \
-  -b 512 \
-  -ub 512 \
-  -np 4 \
   -fa on \
-  --cache-type-k f16 \
-  --cache-type-v f16 \
-  --cache-ram 512 \
+  --split-mode none \
   --spec-type draft-mtp \
   --spec-draft-n-max 3 \
-  --spec-draft-p-min 0.0 \
-  --host 0.0.0.0 \
-  --port 8080
+  --spec-draft-n-min 0 \
+  --kv-unified \
+  --kv-unified-per-slot 131072 \
+  -c 262144 \
+  -np 4 \
+  -b 2048 -ub 512 \
+  --cache-ram 512 \
+  --jinja -n 8192 \
+  --reasoning on --reasoning-effort medium --reasoning-budget -1 \
+  --temp 0.6 --top-k 20 --top-p 1.0 --min-p 0.0 \
+  --host 0.0.0.0 --port 8080
 ```
 
 ---
