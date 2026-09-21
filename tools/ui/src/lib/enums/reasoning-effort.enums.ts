@@ -8,5 +8,6 @@ export enum ReasoningEffort {
 	LOW = 'low',
 	MAX = 'max',
 	MEDIUM = 'medium',
+	XHIGH = 'xhigh',
 	OFF = 'off'
 }
