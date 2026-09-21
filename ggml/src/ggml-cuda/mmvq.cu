@@ -576,11 +576,15 @@ static constexpr __host__ __device__ int calc_nwarps(ggml_type type, int ncols_d
     return 1;
 }
 
-static constexpr __host__ __device__ int calc_rows_per_block(int ncols_dst, int table_id, bool small_k = false, int nwarps = 1) {
+static constexpr __host__ __device__ int calc_rows_per_block(ggml_type type, int ncols_dst, int table_id, bool small_k = false, int nwarps = 1) {
     if (table_id == MMVQ_PARAMETERS_GENERIC || table_id == MMVQ_PARAMETERS_GCN || table_id == MMVQ_PARAMETERS_TURING || table_id == MMVQ_PARAMETERS_GB10) {
         switch (ncols_dst) {
             case 1:
-                return small_k ? nwarps : 1;
+                if (small_k) return nwarps;
+                // [B3] M=1 decode NVFP4: rows_per_block=8 lets the y slice be reused across rows
+                // (y L2 traffic /8). microbench5: 108 -> 202 GB/s (+88%).
+                if (type == GGML_TYPE_NVFP4) return 8;
+                return 1;
             case 2:
             case 3:
             case 4:
@@ -615,7 +619,7 @@ static __global__ void mul_mat_vec_q(
     constexpr int vdr = get_vdr_mmvq(type);
     constexpr mmvq_parameter_table_id table_id = get_device_table_id();
     constexpr int nwarps = calc_nwarps(type, ncols_dst, table_id, small_k, halve_iters);
-    constexpr int rows_per_cuda_block = calc_rows_per_block(ncols_dst, table_id, small_k, nwarps);
+    constexpr int rows_per_cuda_block = calc_rows_per_block(type, ncols_dst, table_id, small_k, nwarps);
     constexpr int warp_size = ggml_cuda_get_physical_warp_size();
 
     constexpr vec_dot_q_cuda_t vec_dot_q_cuda = get_vec_dot_q_cuda(type);
@@ -740,14 +744,40 @@ static __global__ void mul_mat_vec_q(
 
 #pragma unroll
         for (int j = 0; j < ncols_dst; ++j) {
+            // [B3] NVFP4: preload this thread's y slice for column j (one q8_1 block: 8 ints of
+            // qs + d) into registers, reused across every row in this block. Without it the same
+            // y slice is re-read once per row (rows_per_cuda_block times). For NVFP4 qi/vdr == 2,
+            // so (is >> 1) == (tid % 2) and this block is exactly the one the vec_dot will index.
+            [[maybe_unused]] int y_pre[8];
+            [[maybe_unused]] float y_ds = 0.0f;
+            if constexpr (type == GGML_TYPE_NVFP4 && rows_per_cuda_block > 1) {
+                const block_q8_1 * bq8 = y + j*stride_col_y + kby + (tid % 2);
+                const int * qsy = (const int *) bq8->qs;
+#pragma unroll
+                for (int i = 0; i < 8; ++i) {
+                    y_pre[i] = qsy[i];
+                }
+                y_ds = __low2float(bq8->ds);
+            }
+
 #pragma unroll
             for (int i = 0; i < rows_per_cuda_block; ++i) {
-                tmp[j][i] += vec_dot_q_cuda(
-                    vx, &y[j*stride_col_y + kby], kbx_offset + i*stride_row_x + kbx, kqs);
+                if constexpr (type == GGML_TYPE_NVFP4 && rows_per_cuda_block > 1) {
+                    tmp[j][i] += vec_dot_nvfp4_q8_1_preload(
+                        vx, y_pre, y_ds, kbx_offset + i*stride_row_x + kbx, kqs);
+                } else {
+                    tmp[j][i] += vec_dot_q_cuda(
+                        vx, &y[j*stride_col_y + kby], kbx_offset + i*stride_row_x + kbx, kqs);
+                }
                 if constexpr (has_fusion) {
                     if (use_gate) {
-                        tmp_gate[j][i] += vec_dot_q_cuda(
-                            vgate, &y[j*stride_col_y + kby], kbx_offset + i*stride_row_x + kbx, kqs);
+                        if constexpr (type == GGML_TYPE_NVFP4 && rows_per_cuda_block > 1) {
+                            tmp_gate[j][i] += vec_dot_nvfp4_q8_1_preload(
+                                vgate, y_pre, y_ds, kbx_offset + i*stride_row_x + kbx, kqs);
+                        } else {
+                            tmp_gate[j][i] += vec_dot_q_cuda(
+                                vgate, &y[j*stride_col_y + kby], kbx_offset + i*stride_row_x + kbx, kqs);
+                        }
                     }
                 }
             }
@@ -1000,7 +1030,7 @@ static std::pair<dim3, dim3> calc_launch_params(
         const int ncols_dst, const int nrows_x, const int nchannels_dst, const int nsamples_or_ntokens,
         const int warp_size, const mmvq_parameter_table_id table_id, const bool small_k = false, const bool halve_iters = false) {
     const int nwarps = calc_nwarps(type, ncols_dst, table_id, small_k, halve_iters);
-    const int rpb = calc_rows_per_block(ncols_dst, table_id, small_k, nwarps);
+    const int rpb = calc_rows_per_block(type, ncols_dst, table_id, small_k, nwarps);
     const int64_t nblocks = (nrows_x + rpb - 1) / rpb;
     const dim3 block_nums(nblocks, nchannels_dst, nsamples_or_ntokens);
     const dim3 block_dims(warp_size, nwarps, 1);
