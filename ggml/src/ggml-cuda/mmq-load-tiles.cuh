@@ -1700,9 +1700,74 @@ template <ggml_type type, int J, bool fallback> static __device__ __forceinline_
         }
 
         const block_nvfp4 * bxi = (const block_nvfp4 *) x + kb0 + i * stride + kbx;
-        const uint32_t * __restrict__ src_qs = reinterpret_cast<const uint32_t *>(bxi->qs);
         const int kqs = 16 * kbx;
         const int ksc = 4 * kbx;
+
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 1000
+        // DRIVE Thor (sm_100/sm_101) 128-bit vectorized burst load (LDG.E.128)
+        // Defensive check: only use uint4 when pointer is 16-byte aligned, fallback to safe path otherwise
+        if ((((uintptr_t)bxi->qs) & 0xFu) == 0) {
+            const uint4 * src_qs128 = reinterpret_cast<const uint4 *>(bxi->qs);
+            const uint4 v0 = src_qs128[0];
+            const uint4 v1 = src_qs128[1];
+
+            const int2 q0 = get_int_from_table_16(v0.x, kvalues_mxfp4);
+            const int2 q1 = get_int_from_table_16(v0.y, kvalues_mxfp4);
+            const int2 q2 = get_int_from_table_16(v0.z, kvalues_mxfp4);
+            const int2 q3 = get_int_from_table_16(v0.w, kvalues_mxfp4);
+            const int2 q4 = get_int_from_table_16(v1.x, kvalues_mxfp4);
+            const int2 q5 = get_int_from_table_16(v1.y, kvalues_mxfp4);
+            const int2 q6 = get_int_from_table_16(v1.z, kvalues_mxfp4);
+            const int2 q7 = get_int_from_table_16(v1.w, kvalues_mxfp4);
+
+            x_qs[i*sram_stride + kqs + 0] = q0.x;
+            x_qs[i*sram_stride + kqs + 1] = q1.x;
+            x_qs[i*sram_stride + kqs + 2] = q0.y;
+            x_qs[i*sram_stride + kqs + 3] = q1.y;
+            x_df[i*sram_stride + ksc + 0] = ggml_cuda_ue4m3_to_fp32(bxi->d[0]);
+
+            x_qs[i*sram_stride + kqs + 4] = q2.x;
+            x_qs[i*sram_stride + kqs + 5] = q3.x;
+            x_qs[i*sram_stride + kqs + 6] = q2.y;
+            x_qs[i*sram_stride + kqs + 7] = q3.y;
+            x_df[i*sram_stride + ksc + 1] = ggml_cuda_ue4m3_to_fp32(bxi->d[1]);
+
+            x_qs[i*sram_stride + kqs + 8]  = q4.x;
+            x_qs[i*sram_stride + kqs + 9]  = q5.x;
+            x_qs[i*sram_stride + kqs + 10] = q4.y;
+            x_qs[i*sram_stride + kqs + 11] = q5.y;
+            x_df[i*sram_stride + ksc + 2] = ggml_cuda_ue4m3_to_fp32(bxi->d[2]);
+
+            x_qs[i*sram_stride + kqs + 12] = q6.x;
+            x_qs[i*sram_stride + kqs + 13] = q7.x;
+            x_qs[i*sram_stride + kqs + 14] = q6.y;
+            x_qs[i*sram_stride + kqs + 15] = q7.y;
+            x_df[i*sram_stride + ksc + 3] = ggml_cuda_ue4m3_to_fp32(bxi->d[3]);
+        } else {
+            const uint32_t * __restrict__ src_qs = reinterpret_cast<const uint32_t *>(bxi->qs);
+
+#pragma unroll
+            for (int sub = 0; sub < QK_NVFP4 / QK_NVFP4_SUB; ++sub) {
+                const int2 q0 = get_int_from_table_16(src_qs[2 * sub + 0], kvalues_mxfp4);
+                const int2 q1 = get_int_from_table_16(src_qs[2 * sub + 1], kvalues_mxfp4);
+
+#if defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
+                x_qs[i*sram_stride + kqs + 4 * sub + 0] = q0.x;
+                x_qs[i*sram_stride + kqs + 4 * sub + 1] = q1.x;
+                x_qs[i*sram_stride + kqs + 4 * sub + 2] = q0.y;
+                x_qs[i*sram_stride + kqs + 4 * sub + 3] = q1.y;
+                x_df[i*sram_stride + ksc + sub] = ggml_cuda_ue4m3_to_fp32(bxi->d[sub]);
+#else
+                x_qs[i * (2 * MMQ_TILE_NE_K + 1) + kqs + 4 * sub + 0] = q0.x;
+                x_qs[i * (2 * MMQ_TILE_NE_K + 1) + kqs + 4 * sub + 1] = q1.x;
+                x_qs[i * (2 * MMQ_TILE_NE_K + 1) + kqs + 4 * sub + 2] = q0.y;
+                x_qs[i * (2 * MMQ_TILE_NE_K + 1) + kqs + 4 * sub + 3] = q1.y;
+                x_df[i * (2 * MMQ_TILE_NE_K * 2 / QI_NVFP4) + i / (QK_NVFP4_SUB / QI_NVFP4) + ksc + sub] = ggml_cuda_ue4m3_to_fp32(bxi->d[sub]);
+#endif
+            }
+        }
+#else
+        const uint32_t * __restrict__ src_qs = reinterpret_cast<const uint32_t *>(bxi->qs);
 
 #pragma unroll
         for (int sub = 0; sub < QK_NVFP4 / QK_NVFP4_SUB; ++sub) {
@@ -1723,6 +1788,7 @@ template <ggml_type type, int J, bool fallback> static __device__ __forceinline_
             x_df[i * (2 * MMQ_TILE_NE_K * 2 / QI_NVFP4) + i / (QK_NVFP4_SUB / QI_NVFP4) + ksc + sub] = ggml_cuda_ue4m3_to_fp32(bxi->d[sub]);
 #endif // defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
         }
+#endif
     }
 }
 
@@ -1755,6 +1821,32 @@ template <ggml_type type, int J, bool fallback> static __device__ __forceinline_
 
         const block_nvfp4 * bxi = bxi_base + i * stride;
 
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 1000
+        // DRIVE Thor (sm_100/sm_101) 128-bit vectorized burst load (LDG.E.128)
+        // Defensive check: only use uint4 when pointer is 16-byte aligned, fallback to safe path otherwise
+        if ((((uintptr_t)bxi->qs) & 0xFu) == 0) {
+            const uint4 * src_qs128 = reinterpret_cast<const uint4 *>(bxi->qs);
+            const uint4 v0 = src_qs128[0];
+            const uint4 v1 = src_qs128[1];
+
+            x_u32[i*sram_stride + 8*kbx + 0] = v0.x;
+            x_u32[i*sram_stride + 8*kbx + 1] = v0.y;
+            x_u32[i*sram_stride + 8*kbx + 2] = v0.z;
+            x_u32[i*sram_stride + 8*kbx + 3] = v0.w;
+            x_u32[i*sram_stride + 8*kbx + 4] = v1.x;
+            x_u32[i*sram_stride + 8*kbx + 5] = v1.y;
+            x_u32[i*sram_stride + 8*kbx + 6] = v1.z;
+            x_u32[i*sram_stride + 8*kbx + 7] = v1.w;
+        } else {
+            const uint32_t * src_qs = reinterpret_cast<const uint32_t *>(bxi->qs);
+
+#pragma unroll
+            for (int sub = 0; sub < QK_NVFP4 / QK_NVFP4_SUB; ++sub) {
+                x_u32[i*sram_stride + 8*kbx + 2 * sub + 0] = src_qs[2 * sub + 0];
+                x_u32[i*sram_stride + 8*kbx + 2 * sub + 1] = src_qs[2 * sub + 1];
+            }
+        }
+#else
         const uint32_t * src_qs = reinterpret_cast<const uint32_t *>(bxi->qs);
 
 #pragma unroll
@@ -1762,6 +1854,7 @@ template <ggml_type type, int J, bool fallback> static __device__ __forceinline_
             x_u32[i*sram_stride + 8*kbx + 2 * sub + 0] = src_qs[2 * sub + 0];
             x_u32[i*sram_stride + 8*kbx + 2 * sub + 1] = src_qs[2 * sub + 1];
         }
+#endif
 
         x_u32_scale[i*sram_stride] = get_int_b4(bxi->d, 0);
     }
