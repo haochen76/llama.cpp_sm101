@@ -370,6 +370,8 @@ static __device__ __forceinline__ float vec_dot_nvfp4_q8_1_preload(
                                         const float & y_ds,
                                         const int32_t & kbx,
                                         const int32_t & iqs) {
+    // Safety guard: ensure VDR is exactly 4, matching qi/vdr == 8/4 == 2 index assumptions
+    static_assert(VDR_NVFP4_Q8_1_MMVQ == 4, "VDR_NVFP4_Q8_1_MMVQ must be 4 for (is >> 1) == (tid % 2) assumption");
 
     const block_nvfp4 * bq4 = (const block_nvfp4 *) vbq + kbx;
     float sum = 0.0f;

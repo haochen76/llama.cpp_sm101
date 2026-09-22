@@ -744,30 +744,41 @@ void ggml_cuda_flash_attn_ext(ggml_backend_cuda_context & ctx, ggml_tensor * dst
     ggml_cuda_set_device(ctx.device);
 
 #if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA) && CUDART_VERSION >= 11000
-    // DRIVE Thor (sm_100/sm_101) 48MB L2 Cache Persisting Window
-    // Pins active KV cache head in L2 to eliminate cache thrashing during long-context decode
+    // DRIVE Thor (sm_100/sm_101) Optional L2 Cache Persisting Window
+    // Controlled by GGML_CUDA_THOR_L2_PERSIST_MB (default 0 = disabled to avoid L2 thrashing in short ctx/concurrency)
     const int cc = ggml_cuda_info().devices[ctx.device].cc;
-    if (cc >= 1000 && cc < GGML_CUDA_CC_BLACKWELL) {
-        static bool l2_persisting_initialized = false;
-        if (!l2_persisting_initialized) {
-            cudaDeviceProp prop;
-            if (cudaGetDeviceProperties(&prop, ctx.device) == cudaSuccess && prop.persistingL2CacheMaxSize > 0) {
-                // Reserve up to 32MB of Thor's 48MB L2 Cache for persisting memory accesses
-                size_t persisting_size = std::min<size_t>(prop.persistingL2CacheMaxSize, 32 * 1024 * 1024);
-                cudaDeviceSetLimit(cudaLimitPersistingL2CacheSize, persisting_size);
+    if (GGML_CUDA_CC_IS_THOR_FAMILY(cc)) {
+        static int target_mb = -1;
+        if (target_mb < 0) {
+            const char * env = getenv("GGML_CUDA_THOR_L2_PERSIST_MB");
+            target_mb = env ? atoi(env) : 0; // Default 0: disabled per audit recommendation
+            if (target_mb > 0) {
+                cudaDeviceProp prop;
+                if (cudaGetDeviceProperties(&prop, ctx.device) == cudaSuccess && prop.persistingL2CacheMaxSize > 0) {
+                    size_t persisting_size = std::min<size_t>(prop.persistingL2CacheMaxSize, (size_t)target_mb * 1024 * 1024);
+                    cudaDeviceSetLimit(cudaLimitPersistingL2CacheSize, persisting_size);
+                }
             }
-            l2_persisting_initialized = true;
         }
 
-        const ggml_tensor * K = dst->src[1];
-        if (K != nullptr && K->data != nullptr) {
-            cudaStreamAttrValue attr = {};
-            attr.accessPolicyWindow.base_ptr = (void *) K->data;
-            attr.accessPolicyWindow.num_bytes = std::min<size_t>((size_t)ggml_nbytes(K), 32 * 1024 * 1024);
-            attr.accessPolicyWindow.hitRatio = 1.0f;
-            attr.accessPolicyWindow.hitProp = cudaAccessPropertyPersisting;
-            attr.accessPolicyWindow.missProp = cudaAccessPropertyStreaming;
-            cudaStreamSetAttribute(ctx.stream(), cudaStreamAttributeAccessPolicyWindow, &attr);
+        if (target_mb > 0) {
+            const ggml_tensor * K = dst->src[1];
+            if (K != nullptr && K->data != nullptr) {
+                static void * last_k_data = nullptr;
+                static size_t last_k_bytes = 0;
+                const size_t k_bytes = std::min<size_t>((size_t)ggml_nbytes(K), (size_t)target_mb * 1024 * 1024);
+                if (K->data != last_k_data || k_bytes != last_k_bytes) {
+                    cudaStreamAttrValue attr = {};
+                    attr.accessPolicyWindow.base_ptr = (void *) K->data;
+                    attr.accessPolicyWindow.num_bytes = k_bytes;
+                    attr.accessPolicyWindow.hitRatio = 1.0f;
+                    attr.accessPolicyWindow.hitProp = cudaAccessPropertyPersisting;
+                    attr.accessPolicyWindow.missProp = cudaAccessPropertyStreaming;
+                    cudaStreamSetAttribute(ctx.stream(), cudaStreamAttributeAccessPolicyWindow, &attr);
+                    last_k_data = (void *) K->data;
+                    last_k_bytes = k_bytes;
+                }
+            }
         }
     }
 #endif

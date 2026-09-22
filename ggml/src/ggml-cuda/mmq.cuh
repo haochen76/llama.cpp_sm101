@@ -250,8 +250,8 @@ static __host__ ggml_cuda_mmq_config ggml_cuda_mmq_get_config(const ggml_type ty
     if (blackwell_mma_available(cc)) {
         return ggml_cuda_mmq_get_config_blackwell(type, J, fallback);
     }
-    // sm_100/101/103/110 are not covered by GGML_CUDA_CC_BLACKWELL (1200) and have no CC constant of their own yet.
-    if (cc >= 1000 && cc < GGML_CUDA_CC_BLACKWELL) {
+    // DRIVE Thor (sm_100/101/103/110)
+    if (GGML_CUDA_CC_IS_THOR_FAMILY(cc)) {
         return ggml_cuda_mmq_get_config_thor(type, J, fallback);
     }
     if (ggml_cuda_highest_compiled_arch(cc) >= GGML_CUDA_CC_VOLTA) {
