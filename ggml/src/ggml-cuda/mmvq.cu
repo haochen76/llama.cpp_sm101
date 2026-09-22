@@ -576,14 +576,19 @@ static constexpr __host__ __device__ int calc_nwarps(ggml_type type, int ncols_d
     return 1;
 }
 
-static constexpr __host__ __device__ int calc_rows_per_block(ggml_type type, int ncols_dst, int table_id, bool small_k = false, int nwarps = 1) {
+static constexpr __host__ __device__ int calc_rows_per_block(ggml_type type, int ncols_dst, int table_id, bool small_k = false, int nwarps = 1, int rpb_override = 0) {
     if (table_id == MMVQ_PARAMETERS_GENERIC || table_id == MMVQ_PARAMETERS_GCN || table_id == MMVQ_PARAMETERS_TURING || table_id == MMVQ_PARAMETERS_GB10) {
         switch (ncols_dst) {
             case 1:
                 if (small_k) return nwarps;
-                // [B3] M=1 decode NVFP4: rows_per_block=8 lets the y slice be reused across rows
-                // (y L2 traffic /8). microbench5: 108 -> 202 GB/s (+88%).
-                if (type == GGML_TYPE_NVFP4) return 8;
+                // [B3] M=1 decode NVFP4: rows_per_block allows the y slice to be reused across rows.
+                // If rpb_override is specified (1, 2, 4, 8), respect it directly; default to 8.
+                if (type == GGML_TYPE_NVFP4) {
+                    if (rpb_override == 1 || rpb_override == 2 || rpb_override == 4 || rpb_override == 8) {
+                        return rpb_override;
+                    }
+                    return 8;
+                }
                 return 1;
             case 2:
             case 3:
@@ -600,7 +605,7 @@ static constexpr __host__ __device__ int calc_rows_per_block(ggml_type type, int
     return 1;
 }
 
-template <ggml_type type, int ncols_dst, bool has_fusion, bool small_k = false, bool halve_iters = false>
+template <ggml_type type, int ncols_dst, bool has_fusion, bool small_k = false, bool halve_iters = false, int rpb_override = 0>
 __launch_bounds__(calc_nwarps(type, ncols_dst, get_device_table_id(), small_k, halve_iters)*ggml_cuda_get_physical_warp_size(), 1)
 static __global__ void mul_mat_vec_q(
         const void * vx_ptr, const void * vy_ptr, const int32_t * ids_ptr, const ggml_cuda_mm_fusion_args_device fusion, float * dst_ptr,
@@ -619,7 +624,7 @@ static __global__ void mul_mat_vec_q(
     constexpr int vdr = get_vdr_mmvq(type);
     constexpr mmvq_parameter_table_id table_id = get_device_table_id();
     constexpr int nwarps = calc_nwarps(type, ncols_dst, table_id, small_k, halve_iters);
-    constexpr int rows_per_cuda_block = calc_rows_per_block(type, ncols_dst, table_id, small_k, nwarps);
+    constexpr int rows_per_cuda_block = calc_rows_per_block(type, ncols_dst, table_id, small_k, nwarps, rpb_override);
     constexpr int warp_size = ggml_cuda_get_physical_warp_size();
 
     constexpr vec_dot_q_cuda_t vec_dot_q_cuda = get_vec_dot_q_cuda(type);
@@ -1025,19 +1030,19 @@ static __global__ void mul_mat_vec_q_moe(
     }
 }
 
-template<ggml_type type>
+template<ggml_type type, int rpb_override = 0>
 static std::pair<dim3, dim3> calc_launch_params(
         const int ncols_dst, const int nrows_x, const int nchannels_dst, const int nsamples_or_ntokens,
         const int warp_size, const mmvq_parameter_table_id table_id, const bool small_k = false, const bool halve_iters = false) {
     const int nwarps = calc_nwarps(type, ncols_dst, table_id, small_k, halve_iters);
-    const int rpb = calc_rows_per_block(type, ncols_dst, table_id, small_k, nwarps);
+    const int rpb = calc_rows_per_block(type, ncols_dst, table_id, small_k, nwarps, rpb_override);
     const int64_t nblocks = (nrows_x + rpb - 1) / rpb;
     const dim3 block_nums(nblocks, nchannels_dst, nsamples_or_ntokens);
     const dim3 block_dims(warp_size, nwarps, 1);
     return {block_nums, block_dims};
 }
 
-template<ggml_type type, int c_ncols_dst, bool small_k = false, bool halve_iters = false>
+template<ggml_type type, int c_ncols_dst, bool small_k = false, bool halve_iters = false, int rpb_override = 0>
 static void mul_mat_vec_q_switch_fusion(
         const void * vx, const void * vy, const int32_t * ids, const ggml_cuda_mm_fusion_args_device fusion, float * dst,
         const uint32_t ncols_x, const uint3 nchannels_y, const uint32_t stride_row_x, const uint32_t stride_col_y,
@@ -1052,7 +1057,7 @@ static void mul_mat_vec_q_switch_fusion(
     if constexpr (c_ncols_dst == 1) {
         if (has_fusion) {
             const ggml_cuda_kernel_launch_params launch_params = ggml_cuda_kernel_launch_params(block_nums, block_dims, nbytes_shared, stream);
-            ggml_cuda_kernel_launch(mul_mat_vec_q<type, c_ncols_dst, true, small_k, halve_iters>, launch_params,
+            ggml_cuda_kernel_launch(mul_mat_vec_q<type, c_ncols_dst, true, small_k, halve_iters, rpb_override>, launch_params,
                  vx, vy, ids, fusion, dst, ncols_x, nchannels_y, stride_row_x, stride_col_y, stride_col_dst,
                  channel_ratio, stride_channel_x, stride_channel_y, stride_channel_dst,
                  sample_ratio, stride_sample_x, stride_sample_y, stride_sample_dst, ids_stride);
@@ -1063,7 +1068,7 @@ static void mul_mat_vec_q_switch_fusion(
     GGML_ASSERT(!has_fusion && "fusion only supported for ncols_dst=1");
 
     const ggml_cuda_kernel_launch_params launch_params = ggml_cuda_kernel_launch_params(block_nums, block_dims, nbytes_shared, stream);
-    ggml_cuda_kernel_launch(mul_mat_vec_q<type, c_ncols_dst, false, small_k, halve_iters>, launch_params,
+    ggml_cuda_kernel_launch(mul_mat_vec_q<type, c_ncols_dst, false, small_k, halve_iters, rpb_override>, launch_params,
         vx, vy, ids, fusion, dst, ncols_x, nchannels_y, stride_row_x, stride_col_y, stride_col_dst,
         channel_ratio, stride_channel_x, stride_channel_y, stride_channel_dst,
         sample_ratio, stride_sample_x, stride_sample_y, stride_sample_dst, ids_stride);
@@ -1208,8 +1213,9 @@ static void mul_mat_vec_q_switch_ncols_dst(
             static constexpr int c_ncols_dst = 1;
 
             // Tag types keep the flags compile-time, so __launch_bounds__ matches what is launched.
-            const auto launch = [&](auto small_k_tag, auto halve_iters_tag) {
+            const auto launch_with_rpb = [&](auto small_k_tag, auto halve_iters_tag, auto rpb_tag) {
                 constexpr bool c_small_k = decltype(small_k_tag)::value;
+                constexpr int  c_rpb     = decltype(rpb_tag)::value;
                 // Types the table does not promote would compile a second, identical kernel.
                 constexpr bool c_promoted =
                     calc_nwarps(type, c_ncols_dst, MMVQ_PARAMETERS_GB10, false, true) !=
@@ -1217,13 +1223,43 @@ static void mul_mat_vec_q_switch_ncols_dst(
 
                 constexpr bool c_halve_iters = decltype(halve_iters_tag)::value && c_promoted;
 
-                const std::pair<dim3, dim3> dims = calc_launch_params<type>(c_ncols_dst, nrows_x, nchannels_dst,
+                const std::pair<dim3, dim3> dims = calc_launch_params<type, c_rpb>(c_ncols_dst, nrows_x, nchannels_dst,
                                                                               nsamples_dst, warp_size, table_id, c_small_k, c_halve_iters);
-                mul_mat_vec_q_switch_fusion<type, c_ncols_dst, c_small_k, c_halve_iters>(
+                mul_mat_vec_q_switch_fusion<type, c_ncols_dst, c_small_k, c_halve_iters, c_rpb>(
                     vx, vy, ids, fusion, dst, ncols_x, nchannels_y_fd, stride_row_x, stride_col_y, stride_col_dst,
                     channel_ratio_fd, stride_channel_x, stride_channel_y, stride_channel_dst, sample_ratio_fd,
                     stride_sample_x, stride_sample_y, stride_sample_dst, dims.first, dims.second, 0, ids_stride,
                     stream);
+            };
+
+            const auto launch = [&](auto small_k_tag, auto halve_iters_tag) {
+                if constexpr (type == GGML_TYPE_NVFP4) {
+                    // Check runtime RPB override from environment:
+                    // GGML_CUDA_THOR_MMVQ_RPB: 1 (concurrency/high occupancy), 2, 4 (bandwidth/latency balance), 8 (single stream extreme)
+                    // Default is 8 (matching B3 performance).
+                    static const int env_rpb = []() {
+                        const char * env = getenv("GGML_CUDA_THOR_MMVQ_RPB");
+                        if (env) {
+                            int v = atoi(env);
+                            if (v == 1 || v == 2 || v == 4 || v == 8) {
+                                return v;
+                            }
+                        }
+                        return 8;
+                    }();
+
+                    if (env_rpb == 1) {
+                        launch_with_rpb(small_k_tag, halve_iters_tag, std::integral_constant<int, 1>{});
+                    } else if (env_rpb == 2) {
+                        launch_with_rpb(small_k_tag, halve_iters_tag, std::integral_constant<int, 2>{});
+                    } else if (env_rpb == 4) {
+                        launch_with_rpb(small_k_tag, halve_iters_tag, std::integral_constant<int, 4>{});
+                    } else {
+                        launch_with_rpb(small_k_tag, halve_iters_tag, std::integral_constant<int, 8>{});
+                    }
+                } else {
+                    launch_with_rpb(small_k_tag, halve_iters_tag, std::integral_constant<int, 0>{});
+                }
             };
 
             if (should_use_small_k(c_ncols_dst)) {
