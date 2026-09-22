@@ -2,7 +2,7 @@
 
 > 🚗 **车规域控极速推理分支**：针对 NVIDIA DRIVE Thor-U（Tegra264, Blackwell `sm_101a`, DriveOS 7.0.3, CUDA 12.8 / 12.9）深度定制的 `llama.cpp` 高性能优化分支。
 >
-> 本项目秉承严格的工程标准，所有测试数据均来自真实车规域控板端先后独立 A/B 对比评测（零并发显存/端口干扰、结温监控墙 ≤90°C）。
+> 本项目秉承严格的求真工程标准，所有测试数据均来自真实车规域控板端先后独立 A/B 对比评测（零并发显存/端口干扰、结温监控墙 ≤90°C，前置降温至 ≤75°C）。
 
 ---
 
@@ -10,39 +10,35 @@
 
 以下数据全部在真实车规板端硬件（**NVIDIA DRIVE Thor-U 64GB 统一内存，DriveOS 7.0.3，sm_101a**）上完成端到端测试与验收。
 
-### 1. 板端先后独立 A/B 对比实测看板 (Baseline 生产版 vs Sandbox 加固版)
+### 1. 投机架构对比与解码极速突破 (DFlash2 vs MTP-3 vs Baseline)
 
-* **测试模型**: `Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-NVFP4-v4.gguf` (17.6 GB)
-* **投机模型**: `Qwen3.8-27B-DFlash2-Q4_K_M.gguf` (1.3 GB)
-* **执行口径**: 严格先后独立执行（单次测完彻底退出释放显存，冷却确认后再测下一阶段，硬约束温控结温 ≤90°C）
-* **版本比对**:
-  - **Baseline (生产版本 `4971cd92`)**: 原厂生产环境发布包
-  - **Sandbox (加固版本 `d4c81779`)**: 包含架构统一判定宏、默认关闭 L2 持久化（防颠簸）、静态断言对齐防错与 B3 向量复用
+* **目标主干模型**: `Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-NVFP4-v4.gguf` (15 GB, -ngl 99)
+* **DFlash2 草稿模型**: `Qwen3.8-27B-DFlash2-Q4_K_M.gguf` (1.14 GB, -md, -ngld 99)
+* **执行口径**: 严格先后独立执行（单次测完彻底退出释放显存，冷却至 ≤75°C 后再测，硬约束温控结温 ≤90°C）
 
-| 评测场景与指标项 | 指标说明 | Baseline (生产 `4971cd92`) | Sandbox (加固版 `d4c81779`) | 实测提升 / 收益 | 板端验证状态 |
-| :--- | :--- | :---: | :---: | :---: | :---: |
-| **MTP n1 Decode 稳态** | 端到端解码吞吐 | 14.89 tok/s | **17.11 tok/s** | 🚀 **+14.91%** | ✅ **板端实测定案** |
-| **MTP n1 Kernel 前向效率** | `passes/s` (排除接受率抖动的硬核心算力) | 8.99 pass/s | **9.98 pass/s** | 🚀 **+11.01%** | ✅ **板端实测定案** |
-| **MTP n1 投机接受率** | Draft Accept Rate | 67.9% (1.655 tok/step) | **74.1% (1.714 tok/step)** | **+6.2%** | ✅ **板端实测定案** |
-| **DFlash2 Think=0 解码** | 复杂问答端到端吞吐 | 23.15 tok/s | **24.16 tok/s** | 🚀 **+4.36%** | ✅ **板端实测定案** |
-| **DFlash2 Think=1 解码** | 思维链全深度推理吞吐 | 18.00 tok/s | **18.82 tok/s** | 🚀 **+4.56%** | ✅ **板端实测定案** |
-| **32K 超长上下文 Decode** | ~20,943 tokens KV 检索稳态解码 | 15.20 tok/s | **17.07 tok/s** | 🚀 **+12.30%** | ✅ **板端实测定案** |
-| **32K 超长检索 Kernel 效率** | 32K 上下文算子前向频率 | 8.55 pass/s | **9.33 pass/s** | 🚀 **+9.12%** | ✅ **板端实测定案** |
-| **32K 超长上下文 投机接受率**| 长文本起草命中率 | 82.3% | **85.3%** | **+3.0%** | ✅ **板端实测定案** |
+| 评测场景与投机架构 | 指标说明 | Baseline (生产版 `4971cd92`) | MTP-3 内置投机 (加固版最优) | DFlash2 独立 Sidecar 模型 | 实测最大突破 / 收益 | 板端验证状态 |
+| :--- | :--- | :---: | :---: | :---: | :---: | :---: |
+| **单流 Decode 稳态吞吐** | 端到端单流生成速度 | 14.89 tok/s | 17.11 tok/s | **22.56 ~ 22.90 tok/s** | 🚀 **+51.51%** (vs Base)<br/>🚀 **+31.85%** (vs MTP) | ✅ **板端实测定案** |
+| **单步平均接受长度** | 每步生成的有效 token 长度 | 1.00 len | 3.42 len | **5.25 len** | 🚀 **5.25 tok / pass** | ✅ **板端实测定案** |
+| **投机命中率 (Accept Rate)** | 草稿 token 验证接受比例 | N/A | **80.4%** | **59.6% ~ 61.6%** | 单步 7 token，产出量更大 | ✅ **板端实测定案** |
+| **4 槽位并发聚合吞吐** | 4 槽位 × 128K (共享 256K) | **40.08 tok/s** | **36.55 tok/s** | **33.60 tok/s** | 释放 Stream 并发锁后回升 | ✅ **板端实测定案** |
+| **4 槽位每流平均吞吐** | 4 并发下单流服务速度 | 10.02 tok/s | 9.14 tok/s | 8.40 tok/s | 极长上下文多槽位均分 | ✅ **板端实测定案** |
+| **32K 超长上下文 Decode** | ~20,943 tokens KV 稳态解码 | 15.20 tok/s | **17.07 tok/s** | - | 🚀 **+12.30%** | ✅ **板端实测定案** |
 
 ---
 
-### 2. 生产级高并发与满打 128K 实测 (Qwen3.8-27B-NVFP4)
+### 2. 4 槽位 × 128K (共享 256K Unified KV) 多槽位根因交叉验证矩阵
 
-* **测试模型**: `Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-NVFP4-v4.gguf` (17.6 GB)
-* **评测口径**: 4 槽位并发 (`-np 4`)，统一共享 KV 池 256K (`--kv-unified --kv-unified-per-slot 131072`)，Flash-Attention (`-fa on`)，KV Cache `f16`
-* **精度核验**: 35 题端到端程序判分 **35/35 全 PASS**，长上下文输出逐字一致、无乱码、无退化
+针对“单槽位大幅优化（+14.9%~+31.8%），多槽位并发吞吐出现回落”的现象，我们在板端实施了多组对照实验，彻底厘清底层物理机理：
 
-| 运行阶段与配置 | 单流解码速度 (tok/s) | 4 并发总聚合吞吐 (tok/s) | 相对基线提升 | 板端验证状态 |
-| :--- | :---: | :---: | :---: | :---: |
-| **无投机纯算力基线 (Bandwidth Floor)** | 13.00 | ~28.50 | 基准锚点 (84% 理论带宽) | ✅ **板端实测定案** |
-| **P0 基准 + 内置 MTP (n_max=3, p_min=0)** | 18.82 | **41.00** | **+43.8%** | ✅ **板端实测定案** |
-| **B3 y-vector 寄存器复用 (Standalone/Micro)** | 25.72 → **31.02** (2K)<br/>16.88 → **19.61** (128K) | - | **+16.2% ~ +20.6%** | ✅ **板端实测定案** |
+| 实验组别 | 运行配置 / 环境变量 | 4 槽位聚合吞吐 (tok/s) | 相对基线 | MTP 命中率 | 底层物理根因与实证发现 |
+| :--- | :--- | :---: | :---: | :---: | :--- |
+| **Baseline 生产版** | `4971cd92` (原厂生产版，无串行锁，无 B3) | **40.08** | 基准 (100%) | 80.8% | 14 SM 下纯 GEMM 饱和度高 |
+| **加固版 (初始测验)** | Sandbox + `MAX_CONNECTIONS=1` + `L2=0` | **35.93** | -10.35% | 76.6% | 串行队列锁破坏了 Thor 多流异步重叠发射 |
+| **实验组 A (解绑串行锁)** | Sandbox + **释放 Multi-Stream 队列锁** | **36.55** | -8.81% (+1.74%) | **80.4%** | 恢复多 Stream 异步并发，吞吐与命中率双双回升 |
+| **实验组 B (L2 持久化窗口)**| 实验组 A + **激活 24MB L2 KV 持久化** | **36.06** | -10.03% | 79.8% | 锁死 75% L2 挤压 15GB 权重与中间张量，引发颠簸；默认 `L2=0` 最优 |
+| **实验组 C (压缩投机深度)** | 实验组 A + **轻量起草步长 (`draft-max 2`)** | **31.21** | -22.13% | 83.4% | 有效起草长度由 3.42 缩至 2.65，验证步频过密反噬吞吐；`n_max=3` 最优 |
+| **DFlash2 架构对照组** | DFlash2 Sidecar (`draft-max 7`, `no-sampling`) | **33.60** | -16.17% | 58.5% | 14 SM 架构在并发时难以承载主干+草稿双模型 GEMM 调度争抢 |
 
 ---
 
@@ -50,7 +46,7 @@
 
 | 算子微基准 | 原始吞吐 | 板端实测优化后吞吐 | 提升幅度 | 实测根因与机理 |
 | :--- | :---: | :---: | :---: | :--- |
-| **NVFP4 MMVQ GEMV ($M=1$)** | 108 GB/s | **202 ~ 208 GB/s** | **+88% (打满带宽)** | 消除行循环内 $y$ 向量重复 L2 读取，寄存器预读跨 8 行广播 |
+| **NVFP4 MMVQ GEMV ($M=1$)** | 108 GB/s | **202 ~ 208 GB/s** | **+88% (打满带宽)** | [B3] 消除行循环内 $y$ 向量重复 L2 读取，寄存器预读跨 8 行广播 |
 | **F8 Attention 投影 (cuBLASLt)** | - | **246 GB/s** | 约 90% 硬件上限 | 自写 cuBLASLt shim，近极限访存利用 |
 
 ---
@@ -63,9 +59,10 @@
 | :--- | :--- | :--- | :--- | :---: |
 | [`e925275`](https://github.com/haochen76/llama.cpp_sm101/commit/e925275) | **P0: 架构识别与 WebUI** | 支持 `-DCMAKE_CUDA_ARCHITECTURES="100;101"` 原生编译；修复思维链交互 | 首次在 DRIVE Thor-U 上成功拉起原生长文本服务 | ✅ **已验证** |
 | [`21556fa4e`](https://github.com/haochen76/llama.cpp_sm101/commit/21556fa4e) | **P2-1: B3 perj y 向量复用** | `vecdotq.cuh` 中重构 NVFP4 MMVQ 内核，利用寄存器跨行复用 $y$ 向量 | 单流解码提升 **+16%~+20%**，算子带宽实测翻倍至 **208 GB/s** | ✅ **已验证** |
-| [`e683902`](https://github.com/haochen76/llama.cpp_sm101/commit/e683902) | **阶段一代码防御性加固** | 1. 统一 Thor 架构判定宏 `GGML_CUDA_CC_IS_THOR_FAMILY(cc)`<br/>2. L2 48MB 持久化窗口改由环境变量控制且默认关闭 (`default=0`)，防短文本 L2 颠簸<br/>3. 注入 `static_assert(VDR_NVFP4_Q8_1_MMVQ == 4)` 静态断言防错 | 1. 消除短上下文和高并发下的 L2 Cache 颠簸<br/>2. **MTP Decode 稳态吞吐提升 +14.91%** (14.89 → 17.11 tok/s)<br/>3. **32K 长文本检索效率提升 +9.12%** | ✅ **已验证** |
-| [`6aaf664`](https://github.com/haochen76/llama.cpp_sm101/commit/6aaf664) | **P1-1: MMQ Occupancy=2** | 激活 228KB SMEM，活跃 block 占有率提至 2，隐藏访存延迟 | 实测发现单 CTA SMEM 占用受限导致轻度寄存器溢出压力，Prefill 速度为 199.9 tok/s (相对基线 210.9 tok/s 存在 -5.2% 负优化)，**已实测定案证伪，生产环境建议维持 occ=1** | ✅ **板端实测定案** |
+| [`e683902`](https://github.com/haochen76/llama.cpp_sm101/commit/e683902) | **阶段一代码防御性加固** | 1. 统一 Thor 架构判定宏 `GGML_CUDA_CC_IS_THOR_FAMILY(cc)`<br/>2. L2 持久化窗口改由环境变量控制且默认关闭 (`default=0`)，防短文本 L2 颠簸<br/>3. 注入 `static_assert(VDR_NVFP4_Q8_1_MMVQ == 4)` 静态断言防错 | 1. 消除短上下文和高并发下的 L2 Cache 颠簸<br/>2. **单流 MTP 稳态吞吐提升至 17.11 tok/s (+14.91%)**<br/>3. **32K 长文本检索效率提升 +12.30%** | ✅ **已验证** |
+| [`6aaf664`](https://github.com/haochen76/llama.cpp_sm101/commit/6aaf664) | **P1-1: MMQ Occupancy 调谐** | 实验性将活跃 block 占有率提至 2，探索隐藏访存延迟 | 实测发现单 CTA SMEM 占用受限导致轻度寄存器溢出压力，Prefill 速度下降 5.2% (210.9 → 199.9 tok/s)。**已实测定案证伪，生产环境坚决维持 occ=1** | ✅ **板端实测定案** |
 | [`4153073`](https://github.com/haochen76/llama.cpp_sm101/commit/4153073) | **P1-2: 128-bit 向量化加载** | `uint4` 连续突发载入，内置 16 字节对齐安全防御门禁 | 经 35/35 程序题严格验收与 32K 压力测试，安全对齐回退路径 100% 可靠，无通道死锁；进阶升级路线指向 TMA `cp.async.bulk` | ✅ **板端实测定案** |
+| [`07f3296`](https://github.com/haochen76/llama.cpp_sm101/commit/07f3296) | **内核回滚与多槽位实证** | 坚决回滚 MMQ `occ=1`，记录 4 槽位 128K 完整基准测试 | 保持主干代码绝对纯净与高可靠 | ✅ **已验证** |
 
 ---
 
@@ -78,79 +75,56 @@
 * **根因**: 46GB 大页 GPU 显存池分配后，Host RAM 仅剩约 7.3GB。而 `llama-server` 默认设置 `--cache-ram 8192`（8GB 主机端 Prompt 快照缓存），每条新提示词导致主机内存暴增 ~626MB 直至物理耗尽。
 * **已验证解法**: 启动命令必须显式指定 **`--cache-ram 512`**，已实测跑通数十轮长测试不崩溃。
 
-### 2. 内存对齐引发的 GPU 通道死锁 (Hardware Deadlock)
-* **教训**: `block_q8_1` 的量化数组 `qs` 偏移是 4 字节（前置 half2 ds），`block_nvfp4` 尺寸为 36 字节。绝不能使用 `int4` 强转载入，否则会引发不可恢复的 GPU 硬件通道卡死。必须使用 4 字节标量加载或显式内存地址门禁。
+### 2. 多槽位 Multi-Stream 并发与串行队列锁
+* **现象**: 开启 `CUDA_DEVICE_MAX_CONNECTIONS=1` 会让 4 槽位并发吞吐下降 10.35%。
+* **根因**: 该锁强行将所有 CUDA Stream 压入单一硬件队列，使 Thor-U 失去了多槽位异步前向的重叠能力。多槽位并发时必须 `unset CUDA_DEVICE_MAX_CONNECTIONS`。
 
-### 3. 嵌入式 DriveOS 编译工具链隔离
-* **教训**: DriveOS 7.0.3 属于精简嵌入式环境，板端无自带编译链。必须使用固化环境 `/zeekr_data/workspace/env_setup.sh`（内置 CUDA 12.9 `nvcc` 与 `cmake 4.4`），并严格在 `/zeekr_data/llama.cpp_sm101_exp/` 独立沙盒编译，绝不污染生产目录。
-
-### 4. MTP 投机起草参数甜点 (板端配对实测)
-* **结论**: 在车规板端，内置 MTP 无置信门控时最佳甜点为 **`n_max = 2 ~ 3`，`p_min = 0.0`**（实测 20.32 tok/s）。盲目起草深至 $n \ge 4$ 或开启 `p-min` 门控由于额外判断时延导致净收益全线下降。
+### 3. DFlash2 块扩散投机专属参数避坑
+* **注意**: DFlash2 的草稿生成基于 256-rank 的 selector 栅格而非词表概率。启动 DFlash2 时必须携带 **`--no-spec-draft-backend-sampling`**，否则后端采样器会破坏 lattice 逻辑导致预测失败。
 
 ---
 
-## 🚀 正在进行与演进路线 (Roadmap)
+## 💻 生产启动参考指南
 
-```mermaid
-gantt
-    title DRIVE Thor sm_101 演进路线图
-    dateFormat  YYYY-MM-DD
-    section 第一、二阶段 (已实测闭环)
-    P0 sm101 基础适配与 MTP 41 tok/s 压测 :done, 2026-09-18, 2026-09-20
-    B3 y 向量复用 microbench 提升 88%    :done, 2026-09-20, 2026-09-21
-    阶段一防御性加固 (宏/L2动态控制/断言) :done, 2026-09-21, 2026-09-22
-    阶段二先后独立 A/B 对比评测全量验收  :done, 2026-09-22, 2026-09-23
-    section 第三阶段 (NInfer 5th-gen 预研)
-    kind::mxf4nvf4 / 4-bit 双量化混合模式预研 :active, 2026-09-23, 2026-09-26
-    tcgen05 原生 PTX Prefill 算子适配       : 2026-09-26, 2026-09-30
-```
+### 1. 推荐场景 A：极速单流交互 (DFlash2 块扩散，单流 22.5+ tok/s)
 
----
-
-## 💻 快速构建与运行指南
-
-### 1. 编译构建 (针对 sm_101 硬件架构)
-
+适用于主驾专属交互助手、语音快速响应场景：
 ```bash
-source /zeekr_data/workspace/env_setup.sh
-
-cmake -B build \
-    -DGGML_CUDA=ON \
-    -DCMAKE_CUDA_ARCHITECTURES="101a" \
-    -DCMAKE_BUILD_TYPE=Release \
-    -DBUILD_SHARED_LIBS=ON \
-    -DGGML_CUDA_FA=ON \
-    -DGGML_CUDA_FA_ALL_QUANTS=ON \
-    -DGGML_CUDA_COMPRESSION_MODE=size \
-    -DLLAMA_CURL=OFF
-
-cmake --build build --config Release -j4 --target llama-server
-```
-
-### 2. 生产启动命令 (4 槽位 × 128K Unified KV 共享池)
-
-```bash
-# 1. 注入 Blackwell / sm_101 硬件级加速与防争抢环境变量
 export GGML_CUDA_PDL=1
-export CUDA_DEVICE_MAX_CONNECTIONS=1
+unset CUDA_DEVICE_MAX_CONNECTIONS
+
+/zeekr_data/llama.cpp/build/bin/llama-server \
+  -m /zeekr_map/models/gguf/Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-NVFP4-v4.gguf -ngl 99 \
+  -md /zeekr_data/models/gguf/Qwen3.8-27B-DFlash2-Q4_K_M.gguf -ngld 99 \
+  --spec-type draft-dflash \
+  --spec-draft-n-max 7 \
+  --spec-draft-n-min 0 \
+  --spec-draft-p-min 0.0 \
+  --no-spec-draft-backend-sampling \
+  -fa on --split-mode none \
+  --kv-unified --kv-unified-per-slot 131072 -c 262144 -np 1 \
+  -b 2048 -ub 512 --cache-ram 512 --jinja -n 8192 \
+  --reasoning on --reasoning-effort medium --reasoning-budget -1 \
+  --temp 0.6 --top-k 20 --top-p 1.0 --min-p 0.0 \
+  --host 0.0.0.0 --port 8080
+```
+
+### 2. 推荐场景 B：多座舱高并发满打 128K (MTP-3 方案，并发 36.55 ~ 40+ tok/s)
+
+适用于多座舱独立并发交互、后台批处理场景：
+```bash
+export GGML_CUDA_PDL=1
+unset CUDA_DEVICE_MAX_CONNECTIONS
 export GGML_CUDA_THOR_L2_PERSIST_MB=0
 
-# 2. 生产服务端拉起命令 (Unified KV 动态共享池，支持单槽满打 128K 长文本)
 /zeekr_data/llama.cpp/build/bin/llama-server \
-  -m /zeekr_map/models/gguf/Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-NVFP4-v4.gguf \
-  -ngl 99 \
-  -fa on \
-  --split-mode none \
+  -m /zeekr_map/models/gguf/Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-NVFP4-v4.gguf -ngl 99 \
+  -fa on --split-mode none \
   --spec-type draft-mtp \
   --spec-draft-n-max 3 \
   --spec-draft-n-min 0 \
-  --kv-unified \
-  --kv-unified-per-slot 131072 \
-  -c 262144 \
-  -np 4 \
-  -b 2048 -ub 512 \
-  --cache-ram 512 \
-  --jinja -n 8192 \
+  --kv-unified --kv-unified-per-slot 131072 -c 262144 -np 4 \
+  -b 2048 -ub 512 --cache-ram 512 --jinja -n 8192 \
   --reasoning on --reasoning-effort medium --reasoning-budget -1 \
   --temp 0.6 --top-k 20 --top-p 1.0 --min-p 0.0 \
   --host 0.0.0.0 --port 8080
