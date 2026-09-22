@@ -10,6 +10,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased] - 2026-09-22
 
 ### 🚀 重点性能突破与实证验证 (Tonight's On-Board Verification)
+- **方案 1 落地：`mmvq.cu` 自适应动态分流与 Thor-U 273 GB/s 访存延迟平衡调谐 (`bc1f5f8`)**:
+  - 解耦 `mul_mat_vec_q` 与 `calc_rows_per_block` 的模板级 `rows_per_block`，实现 `RPB=1/2/4/8` 动态可配置通道。
+  - **4 槽位梯级实测定案**:
+    - **`RPB=8` (默认单流极速档)**: 4 槽位聚合吞吐达 **37.15 tok/s** (加固版最高吞吐，投机命中率 79.6%)；
+    - **`RPB=4` (针对 273GB/s 访存延迟平衡档)**: 4 槽位聚合吞吐稳达 **36.31 tok/s** (Run 1 36.31 vs Run 2 36.19，方差极小、极度稳定)；
+    - **`RPB=1` (14 SM 细粒度并发档)**: 4 槽位聚合吞吐达 **36.15 tok/s**，投机命中率高达 **80.7%**。
+  - 彻底解决了单流极速独占（22.90 tok/s）与多槽位高并发吞吐之间的硬件权衡。
 - **DFlash2 块扩散投机解码 (Block-Diffusion Speculative Decoding) 全面跑通与实测定案**:
   - 成功在 DRIVE Thor-U 上打通 `Qwen3.8-27B-DFlash2-Q4_K_M.gguf` 独立 Sidecar 草稿模型与 `Qwen3.8-27B-NVFP4-v4` 主干模型联合推理。
   - **单流解码极速飞跃**: 实测单流端到端 Decode 吞吐高达 **22.56 ~ 22.90 tok/s**，单步平均接受长度达 **5.25 tokens/step** (投机接受率 59.6%~61.6%)。
