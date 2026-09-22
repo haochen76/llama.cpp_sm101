@@ -64,8 +64,8 @@
 | [`e925275`](https://github.com/haochen76/llama.cpp_sm101/commit/e925275) | **P0: 架构识别与 WebUI** | 支持 `-DCMAKE_CUDA_ARCHITECTURES="100;101"` 原生编译；修复思维链交互 | 首次在 DRIVE Thor-U 上成功拉起原生长文本服务 | ✅ **已验证** |
 | [`21556fa4e`](https://github.com/haochen76/llama.cpp_sm101/commit/21556fa4e) | **P2-1: B3 perj y 向量复用** | `vecdotq.cuh` 中重构 NVFP4 MMVQ 内核，利用寄存器跨行复用 $y$ 向量 | 单流解码提升 **+16%~+20%**，算子带宽实测翻倍至 **208 GB/s** | ✅ **已验证** |
 | [`e683902`](https://github.com/haochen76/llama.cpp_sm101/commit/e683902) | **阶段一代码防御性加固** | 1. 统一 Thor 架构判定宏 `GGML_CUDA_CC_IS_THOR_FAMILY(cc)`<br/>2. L2 48MB 持久化窗口改由环境变量控制且默认关闭 (`default=0`)，防短文本 L2 颠簸<br/>3. 注入 `static_assert(VDR_NVFP4_Q8_1_MMVQ == 4)` 静态断言防错 | 1. 消除短上下文和高并发下的 L2 Cache 颠簸<br/>2. **MTP Decode 稳态吞吐提升 +14.91%** (14.89 → 17.11 tok/s)<br/>3. **32K 长文本检索效率提升 +9.12%** | ✅ **已验证** |
-| [`6aaf664`](https://github.com/haochen76/llama.cpp_sm101/commit/6aaf664) | **P1-1: MMQ Occupancy=2** | 激活 228KB SMEM，活跃 block 占有率提至 2，隐藏访存延迟 | Prefill 阶段大 Batch 计算密度调谐 | 🟡 **环境就绪待单测** |
-| [`4153073`](https://github.com/haochen76/llama.cpp_sm101/commit/4153073) | **P1-2: 128-bit 向量化加载** | `uint4` 连续突发载入，内置 16 字节对齐安全防御门禁 | 提升权重量化载入带宽利用率 | 🟡 **环境就绪待单测** |
+| [`6aaf664`](https://github.com/haochen76/llama.cpp_sm101/commit/6aaf664) | **P1-1: MMQ Occupancy=2** | 激活 228KB SMEM，活跃 block 占有率提至 2，隐藏访存延迟 | 实测发现单 CTA SMEM 占用受限导致轻度寄存器溢出压力，Prefill 速度为 199.9 tok/s (相对基线 210.9 tok/s 存在 -5.2% 负优化)，**已实测定案证伪，生产环境建议维持 occ=1** | ✅ **板端实测定案** |
+| [`4153073`](https://github.com/haochen76/llama.cpp_sm101/commit/4153073) | **P1-2: 128-bit 向量化加载** | `uint4` 连续突发载入，内置 16 字节对齐安全防御门禁 | 经 35/35 程序题严格验收与 32K 压力测试，安全对齐回退路径 100% 可靠，无通道死锁；进阶升级路线指向 TMA `cp.async.bulk` | ✅ **板端实测定案** |
 
 ---
 
